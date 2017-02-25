@@ -23,6 +23,7 @@ type RAWConn struct {
 	layer *pktLayers
 	buf   []byte
 	clean *exec.Cmd
+	r     *Raw
 }
 
 func (raw *RAWConn) Close() (err error) {
@@ -72,8 +73,8 @@ func (raw *RAWConn) sendSyn() (err error) {
 	tcp.setFlag(SYN)
 	options := tcp.options
 	defer func() { tcp.options = options }()
-	tcp.options = append(tcp.options, TCPOption{
-		kind:   TCPOptionKindMSS,
+	tcp.options = append(tcp.options, tcpOption{
+		kind:   tcpOptionKindMSS,
 		length: 4,
 		data:   []byte{0x5, 0xb4},
 	})
@@ -86,8 +87,8 @@ func (conn *RAWConn) sendSynAck() (err error) {
 	tcp.setFlag(SYN | ACK)
 	options := tcp.options
 	defer func() { tcp.options = options }()
-	tcp.options = append(tcp.options, TCPOption{
-		kind:   TCPOptionKindMSS,
+	tcp.options = append(tcp.options, tcpOption{
+		kind:   tcpOptionKindMSS,
 		length: 4,
 		data:   []byte{0x5, 0xb4},
 	})
@@ -123,7 +124,7 @@ func (raw *RAWConn) Write(b []byte) (n int, err error) {
 	return
 }
 
-func (raw *RAWConn) ReadTCPLayer() (tcp *TCPLayer, addr *net.UDPAddr, err error) {
+func (raw *RAWConn) ReadTCPLayer() (tcp *tcpLayer, addr *net.UDPAddr, err error) {
 	for {
 		var n int
 		var ipaddr *net.IPAddr
@@ -140,7 +141,7 @@ func (raw *RAWConn) ReadTCPLayer() (tcp *TCPLayer, addr *net.UDPAddr, err error)
 			return
 		}
 		if tcp.chkFlag(RST) {
-			if ignrst {
+			if raw.r.IgnRST {
 				continue
 			} else {
 				err = fmt.Errorf("connect reset by peer %s", addr.String())
@@ -187,7 +188,7 @@ func (raw *RAWConn) SetWriteDeadline(t time.Time) error {
 
 func (raw *RAWConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 	for {
-		var tcp *TCPLayer
+		var tcp *tcpLayer
 		tcp, addr, err = raw.ReadTCPLayer()
 		if err != nil {
 			return
@@ -223,7 +224,7 @@ func (raw *RAWConn) WriteTo(b []byte, addr net.Addr) (n int, err error) {
 	return raw.Write(b)
 }
 
-func DialRAW(address string) (raw *RAWConn, err error) {
+func (r *Raw) DialRAW(address string) (raw *RAWConn, err error) {
 	udp, err := net.Dial("udp4", address)
 	if err != nil {
 		return
@@ -234,8 +235,8 @@ func DialRAW(address string) (raw *RAWConn, err error) {
 	fatalErr(err)
 	wconn, err := net.ListenIP("ip4:tcp", &net.IPAddr{IP: ulocaladdr.IP})
 	fatalErr(err)
-	if dscp != 0 {
-		ipv4.NewConn(wconn).SetTOS(dscp)
+	if r.DSCP != 0 {
+		ipv4.NewConn(wconn).SetTOS(r.DSCP)
 	}
 	rconn, err := ipv4.NewRawConn(conn)
 	fatalErr(err)
@@ -258,11 +259,11 @@ func DialRAW(address string) (raw *RAWConn, err error) {
 		udp:   udp,
 		buf:   make([]byte, 65536),
 		layer: &pktLayers{
-			ip4: &IPv4Layer{
+			ip4: &iPv4Layer{
 				srcip: ulocaladdr.IP,
 				dstip: uremoteaddr.IP,
 			},
-			tcp: &TCPLayer{
+			tcp: &tcpLayer{
 				srcPort: ulocaladdr.Port,
 				dstPort: uremoteaddr.Port,
 				window:  12580,
@@ -270,6 +271,7 @@ func DialRAW(address string) (raw *RAWConn, err error) {
 				data:    make([]byte, 65536),
 			},
 		},
+		r: r,
 	}
 	binary.Read(rand.Reader, binary.LittleEndian, &(raw.layer.tcp.seqn))
 	defer func() {
@@ -314,7 +316,7 @@ func DialRAW(address string) (raw *RAWConn, err error) {
 		if err != nil {
 			return
 		}
-		var tcp *TCPLayer
+		var tcp *tcpLayer
 		tcp, _, err = raw.ReadTCPLayer()
 		if err != nil {
 			e, ok := err.(net.Error)
@@ -336,15 +338,15 @@ func DialRAW(address string) (raw *RAWConn, err error) {
 			break
 		}
 	}
-	if noHTTP {
+	if r.NoHTTP {
 		return
 	}
 	retry = 0
 	opt := getTCPOptions()
 	var headers string
-	if len(httpHost) != 0 {
-		headers += "Host: " + httpHost + "\r\n"
-		headers += "X-Online-Host: " + httpHost + "\r\n"
+	if len(r.Host) != 0 {
+		headers += "Host: " + r.Host + "\r\n"
+		headers += "X-Online-Host: " + r.Host + "\r\n"
 	}
 	req := buildHTTPRequest(headers)
 	for {
@@ -364,7 +366,7 @@ func DialRAW(address string) (raw *RAWConn, err error) {
 		if err != nil {
 			return
 		}
-		var tcp *TCPLayer
+		var tcp *tcpLayer
 		tcp, _, err = raw.ReadTCPLayer()
 		if err != nil {
 			e, ok := err.(net.Error)
@@ -385,7 +387,7 @@ func DialRAW(address string) (raw *RAWConn, err error) {
 			continue
 		}
 		n := len(tcp.payload)
-		if tcp.chkFlag(PSH|ACK) && n >= TCPLEN && checkTCPOptions(tcp.options) {
+		if tcp.chkFlag(PSH|ACK) && n >= tcpLen && checkTCPOptions(tcp.options) {
 			head := string(tcp.payload[:4])
 			tail := string(tcp.payload[n-4:])
 			if head == "HTTP" && tail == "\r\n\r\n" {
@@ -405,7 +407,7 @@ type RAWListener struct {
 	laddr   *net.UDPAddr
 }
 
-func ListenRAW(address string) (listener *RAWListener, err error) {
+func (r *Raw) ListenRAW(address string) (listener *RAWListener, err error) {
 	udpaddr, err := net.ResolveUDPAddr("udp4", address)
 	if err != nil {
 		return
@@ -421,8 +423,8 @@ func ListenRAW(address string) (listener *RAWListener, err error) {
 	if err != nil {
 		return
 	}
-	if dscp != 0 {
-		ipv4.NewConn(wconn).SetTOS(dscp)
+	if r.DSCP != 0 {
+		ipv4.NewConn(wconn).SetTOS(r.DSCP)
 	}
 	rconn, err := ipv4.NewRawConn(conn)
 	fatalErr(err)
@@ -446,6 +448,7 @@ func ListenRAW(address string) (listener *RAWListener, err error) {
 			udp:   nil,
 			buf:   make([]byte, 65536),
 			layer: nil,
+			r:     r,
 		},
 		newcons: make(map[string]*connInfo),
 		conns:   make(map[string]*connInfo),
@@ -464,7 +467,7 @@ func ListenRAW(address string) (listener *RAWListener, err error) {
 
 func (listener *RAWListener) doRead(b []byte) (n int, addr *net.UDPAddr, err error) {
 	for {
-		var tcp *TCPLayer
+		var tcp *tcpLayer
 		var addrstr string
 		tcp, addr, err = listener.ReadTCPLayer()
 		if addr != nil {
@@ -492,7 +495,7 @@ func (listener *RAWListener) doRead(b []byte) (n int, addr *net.UDPAddr, err err
 				t.ackn = tcp.seqn + uint32(n)
 			}
 			//fmt.Println("read from ", addrstr, " to ", tcp.DstPort, " with ", n, " bytes")
-			if info.state == HTTPREPSENT {
+			if info.state == httprepsent {
 				if tcp.chkFlag(PSH | ACK) {
 					if checkTCPOptions(tcp.options) && n > 20 {
 						head := string(tcp.payload[:4])
@@ -509,14 +512,14 @@ func (listener *RAWListener) doRead(b []byte) (n int, addr *net.UDPAddr, err err
 						}
 					} else {
 						info.rep = nil
-						info.state = ESTABLISHED
+						info.state = established
 					}
 				} else {
 					listener.layer = info.layer
 					listener.sendFin()
 				}
 			}
-			if info.state == ESTABLISHED {
+			if info.state == established {
 				copy(b, tcp.payload)
 				return
 			}
@@ -530,17 +533,17 @@ func (listener *RAWListener) doRead(b []byte) (n int, addr *net.UDPAddr, err err
 		})
 		if ok {
 			t := info.layer.tcp
-			if info.state == SYNRECEIVED {
+			if info.state == synreceived {
 				if tcp.chkFlag(ACK) && !tcp.chkFlag(PSH|FIN|SYN) {
 					t.seqn++
-					if noHTTP {
-						info.state = ESTABLISHED
+					if listener.r.NoHTTP {
+						info.state = established
 						listener.mutex.run(func() {
 							listener.conns[addrstr] = info
 							delete(listener.newcons, addrstr)
 						})
 					} else {
-						info.state = WAITHTTPREQ
+						info.state = waithttpreq
 					}
 				} else if tcp.chkFlag(SYN) && !tcp.chkFlag(ACK|PSH) {
 					listener.layer = info.layer
@@ -549,7 +552,7 @@ func (listener *RAWListener) doRead(b []byte) (n int, addr *net.UDPAddr, err err
 						return
 					}
 				}
-			} else if info.state == WAITHTTPREQ {
+			} else if info.state == waithttpreq {
 				if tcp.chkFlag(ACK|PSH) && checkTCPOptions(tcp.options) && n > 20 {
 					head := string(tcp.payload[:4])
 					tail := string(tcp.payload[n-4:])
@@ -566,7 +569,7 @@ func (listener *RAWListener) doRead(b []byte) (n int, addr *net.UDPAddr, err err
 						if err != nil {
 							return
 						}
-						info.state = HTTPREPSENT
+						info.state = httprepsent
 						listener.mutex.run(func() {
 							listener.conns[addrstr] = info
 							delete(listener.newcons, addrstr)
@@ -583,11 +586,11 @@ func (listener *RAWListener) doRead(b []byte) (n int, addr *net.UDPAddr, err err
 			continue
 		}
 		layer := &pktLayers{
-			ip4: &IPv4Layer{
+			ip4: &iPv4Layer{
 				srcip: listener.laddr.IP,
 				dstip: addr.IP,
 			},
-			tcp: &TCPLayer{
+			tcp: &tcpLayer{
 				srcPort: listener.laddr.Port,
 				dstPort: addr.Port,
 				window:  12580,
@@ -597,7 +600,7 @@ func (listener *RAWListener) doRead(b []byte) (n int, addr *net.UDPAddr, err err
 		}
 		if tcp.chkFlag(SYN) && !tcp.chkFlag(ACK|PSH|FIN) {
 			info = &connInfo{
-				state: SYNRECEIVED,
+				state: synreceived,
 				layer: layer,
 			}
 			binary.Read(rand.Reader, binary.LittleEndian, &(info.layer.tcp.seqn))
@@ -642,8 +645,8 @@ func (listener *RAWListener) WriteTo(b []byte, addr net.Addr) (n int, err error)
 }
 
 type pktLayers struct {
-	ip4 *IPv4Layer
-	tcp *TCPLayer
+	ip4 *iPv4Layer
+	tcp *tcpLayer
 }
 
 type connInfo struct {
@@ -652,18 +655,18 @@ type connInfo struct {
 	rep   []byte
 }
 
-func getTCPOptions() []TCPOption {
-	return []TCPOption{
+func getTCPOptions() []tcpOption {
+	return []tcpOption{
 		{
-			kind:   TCPOptionKindSACKPermitted,
+			kind:   tcpOptionKindSACKPermitted,
 			length: 2,
 		},
 	}
 }
 
-func checkTCPOptions(options []TCPOption) (ok bool) {
+func checkTCPOptions(options []tcpOption) (ok bool) {
 	for _, v := range options {
-		if v.kind == TCPOptionKindSACKPermitted {
+		if v.kind == tcpOptionKindSACKPermitted {
 			ok = true
 			break
 		}
@@ -674,22 +677,22 @@ func checkTCPOptions(options []TCPOption) (ok bool) {
 // copy from github.com/google/gopacket/layers/tcp.go
 
 const (
-	TCPOptionKindEndList                         = 0
-	TCPOptionKindNop                             = 1
-	TCPOptionKindMSS                             = 2  // len = 4
-	TCPOptionKindWindowScale                     = 3  // len = 3
-	TCPOptionKindSACKPermitted                   = 4  // len = 2
-	TCPOptionKindSACK                            = 5  // len = n
-	TCPOptionKindEcho                            = 6  // len = 6, obsolete
-	TCPOptionKindEchoReply                       = 7  // len = 6, obsolete
-	TCPOptionKindTimestamps                      = 8  // len = 10
-	TCPOptionKindPartialOrderConnectionPermitted = 9  // len = 2, obsolete
-	TCPOptionKindPartialOrderServiceProfile      = 10 // len = 3, obsolete
-	TCPOptionKindCC                              = 11 // obsolete
-	TCPOptionKindCCNew                           = 12 // obsolete
-	TCPOptionKindCCEcho                          = 13 // obsolete
-	TCPOptionKindAltChecksum                     = 14 // len = 3, obsolete
-	TCPOptionKindAltChecksumData                 = 15 // len = n, obsolete
+	tcpOptionKindEndList                         = 0
+	tcpOptionKindNop                             = 1
+	tcpOptionKindMSS                             = 2  // len = 4
+	tcpOptionKindWindowScale                     = 3  // len = 3
+	tcpOptionKindSACKPermitted                   = 4  // len = 2
+	tcpOptionKindSACK                            = 5  // len = n
+	tcpOptionKindEcho                            = 6  // len = 6, obsolete
+	tcpOptionKindEchoReply                       = 7  // len = 6, obsolete
+	tcpOptionKindTimestamps                      = 8  // len = 10
+	tcpOptionKindPartialOrderConnectionPermitted = 9  // len = 2, obsolete
+	tcpOptionKindPartialOrderServiceProfile      = 10 // len = 3, obsolete
+	tcpOptionKindCC                              = 11 // obsolete
+	tcpOptionKindCCNew                           = 12 // obsolete
+	tcpOptionKindCCEcho                          = 13 // obsolete
+	tcpOptionKindAltChecksum                     = 14 // len = 3, obsolete
+	tcpOptionKindAltChecksumData                 = 15 // len = n, obsolete
 )
 
 const (
@@ -706,21 +709,21 @@ const (
 )
 
 const (
-	TCPLEN = 20 // FIXME
+	tcpLen = 20 // FIXME
 )
 
-type IPv4Layer struct {
+type iPv4Layer struct {
 	srcip net.IP
 	dstip net.IP
 }
 
-type TCPOption struct {
+type tcpOption struct {
 	kind   uint8
 	length uint8
 	data   []byte
 }
 
-type TCPLayer struct {
+type tcpLayer struct {
 	srcPort    int
 	dstPort    int
 	seqn       uint32
@@ -732,16 +735,16 @@ type TCPLayer struct {
 	window     uint16
 	chksum     uint16
 	urgent     uint16 // if URG is set
-	options    []TCPOption
-	opts       [4]TCPOption // pre allocate
+	options    []tcpOption
+	opts       [4]tcpOption // pre allocate
 	padding    []byte
 	pads       [4]byte // pre allocate
 	payload    []byte
 	data       []byte // if data is not nil, marshal method will use this slice
 }
 
-func decodeTCPlayer(data []byte) (tcp *TCPLayer, err error) {
-	tcp = &TCPLayer{}
+func decodeTCPlayer(data []byte) (tcp *tcpLayer, err error) {
+	tcp = &tcpLayer{}
 	defer func() {
 		if err != nil {
 			tcp = nil
@@ -749,8 +752,8 @@ func decodeTCPlayer(data []byte) (tcp *TCPLayer, err error) {
 	}()
 
 	length := len(data)
-	if length < TCPLEN {
-		err = fmt.Errorf("Invalid TCP packet length %d < %d", length, TCPLEN)
+	if length < tcpLen {
+		err = fmt.Errorf("Invalid TCP packet length %d < %d", length, tcpLen)
 		return
 	}
 
@@ -778,23 +781,23 @@ func decodeTCPlayer(data []byte) (tcp *TCPLayer, err error) {
 		tcp.payload = data[headerLen:]
 	}
 
-	if headerLen == TCPLEN {
+	if headerLen == tcpLen {
 		return
 	}
 
-	data = data[TCPLEN:headerLen]
+	data = data[tcpLen:headerLen]
 	for len(data) > 0 {
 		if tcp.options == nil {
 			tcp.options = tcp.opts[:0]
 		}
-		tcp.options = append(tcp.options, TCPOption{kind: data[0]})
+		tcp.options = append(tcp.options, tcpOption{kind: data[0]})
 		opt := &tcp.options[len(tcp.options)-1]
 		switch opt.kind {
-		case TCPOptionKindEndList:
+		case tcpOptionKindEndList:
 			opt.length = 1
 			tcp.padding = data[1:]
 			break
-		case TCPOptionKindNop:
+		case tcpOptionKindNop:
 			opt.length = 1
 		default:
 			opt.length = data[1]
@@ -813,13 +816,13 @@ func decodeTCPlayer(data []byte) (tcp *TCPLayer, err error) {
 	return
 }
 
-func (tcp *TCPLayer) marshal(srcip, dstip net.IP) (data []byte) {
+func (tcp *tcpLayer) marshal(srcip, dstip net.IP) (data []byte) {
 	tcp.padding = nil
 
-	headerLen := TCPLEN
+	headerLen := tcpLen
 	for _, v := range tcp.options {
 		switch v.kind {
-		case TCPOptionKindEndList, TCPOptionKindNop:
+		case tcpOptionKindEndList, tcpOptionKindNop:
 			headerLen++
 		default:
 			v.length = uint8(len(v.data) + 2)
@@ -857,7 +860,7 @@ func (tcp *TCPLayer) marshal(srcip, dstip net.IP) (data []byte) {
 	for _, v := range tcp.options {
 		data[start] = byte(v.kind)
 		switch v.kind {
-		case TCPOptionKindEndList, TCPOptionKindNop:
+		case tcpOptionKindEndList, tcpOptionKindNop:
 			start++
 		default:
 			data[start+1] = v.length
@@ -874,11 +877,11 @@ func (tcp *TCPLayer) marshal(srcip, dstip net.IP) (data []byte) {
 	return
 }
 
-func (tcp *TCPLayer) setFlag(flag uint8) {
+func (tcp *tcpLayer) setFlag(flag uint8) {
 	tcp.flags |= flag
 }
 
-func (tcp *TCPLayer) chkFlag(flag uint8) bool {
+func (tcp *tcpLayer) chkFlag(flag uint8) bool {
 	return tcp.flags&flag == flag
 }
 

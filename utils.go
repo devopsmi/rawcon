@@ -9,32 +9,39 @@ import (
 	"time"
 )
 
-var (
-	noHTTP   bool
-	httpHost string
-	dscp     int
-	ignrst   bool
-)
-
-// SetNoHTTP determines whether to do http obfuscating
-func SetNoHTTP(v bool) {
-	noHTTP = v
+type Raw struct {
+	NoHTTP bool
+	Host   string
+	DSCP   int
+	IgnRST bool
 }
 
-// SetHost set http host
-func SetHost(v string) {
-	httpHost = v
-}
-
-// SetDSCP set tos number
-func SetDSCP(v int) {
-	dscp = v
-}
-
-// SetIgnRST if v is true, the tcp rst packet will be ignored
-func SetIgnRST(v bool) {
-	ignrst = v
-}
+//var (
+//	noHTTP   bool
+//	httpHost string
+//	dscp     int
+//	ignrst   bool
+//)
+//
+//// SetNoHTTP determines whether to do http obfuscating
+//func SetNoHTTP(v bool) {
+//	noHTTP = v
+//}
+//
+//// SetHost set http host
+//func SetHost(v string) {
+//	httpHost = v
+//}
+//
+//// SetDSCP set tos number
+//func SetDSCP(v int) {
+//	dscp = v
+//}
+//
+//// SetIgnRST if v is true, the tcp rst packet will be ignored
+//func SetIgnRST(v bool) {
+//	ignrst = v
+//}
 
 type callback func()
 
@@ -146,8 +153,8 @@ func (t *timeoutErr) Timeout() bool {
 }
 
 const (
-	SYNRECEIVED = 0
-	WAITHTTPREQ = 1
-	HTTPREPSENT = 2
-	ESTABLISHED = 3
+	synreceived = 0
+	waithttpreq = 1
+	httprepsent = 2
+	established = 3
 )
