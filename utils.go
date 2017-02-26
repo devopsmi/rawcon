@@ -16,33 +16,6 @@ type Raw struct {
 	IgnRST bool
 }
 
-//var (
-//	noHTTP   bool
-//	httpHost string
-//	dscp     int
-//	ignrst   bool
-//)
-//
-//// SetNoHTTP determines whether to do http obfuscating
-//func SetNoHTTP(v bool) {
-//	noHTTP = v
-//}
-//
-//// SetHost set http host
-//func SetHost(v string) {
-//	httpHost = v
-//}
-//
-//// SetDSCP set tos number
-//func SetDSCP(v int) {
-//	dscp = v
-//}
-//
-//// SetIgnRST if v is true, the tcp rst packet will be ignored
-//func SetIgnRST(v bool) {
-//	ignrst = v
-//}
-
 type callback func()
 
 type myMutex struct {

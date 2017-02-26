@@ -199,10 +199,6 @@ func (conn *RAWConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 				continue
 			}
 		}
-		n = len(tcp.Payload)
-		if n == 0 {
-			continue
-		}
 		if conn.udp != nil {
 			addr = conn.RemoteAddr()
 		} else {
@@ -211,11 +207,14 @@ func (conn *RAWConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 				Port: int(tcp.SrcPort),
 			}
 		}
-		conn.layer.tcp.Ack += uint32(n)
-		if uint64(tcp.Seq)+uint64(n) > uint64(conn.layer.tcp.Ack) {
-			conn.layer.tcp.Ack = tcp.Seq + uint32(n)
+		n = len(tcp.Payload)
+		if n > 0 {
+			conn.layer.tcp.Ack += uint32(n)
+			if uint64(tcp.Seq)+uint64(n) > uint64(conn.layer.tcp.Ack) {
+				conn.layer.tcp.Ack = tcp.Seq + uint32(n)
+			}
+			copy(b, tcp.Payload)
 		}
-		copy(b, tcp.Payload)
 		return
 	}
 }
@@ -647,6 +646,9 @@ func (listener *RAWListener) ReadFrom(b []byte) (n int, addr net.Addr, err error
 				return
 			}
 			continue
+		}
+		if ok && n == 0 {
+			return
 		}
 		listener.mutex.run(func() {
 			info, ok = listener.newcons[addrstr]

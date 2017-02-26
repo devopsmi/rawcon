@@ -209,13 +209,12 @@ func (raw *RAWConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 			}
 		}
 		n = len(tcp.payload)
-		if n == 0 {
-			continue
+		if n > 0 {
+			if uint64(tcp.seqn)+uint64(n) > uint64(raw.layer.tcp.ackn) {
+				raw.layer.tcp.ackn = tcp.seqn + uint32(n)
+			}
+			copy(b, tcp.payload)
 		}
-		if uint64(tcp.seqn)+uint64(n) > uint64(raw.layer.tcp.ackn) {
-			raw.layer.tcp.ackn = tcp.seqn + uint32(n)
-		}
-		copy(b, tcp.payload)
 		return n, addr, err
 	}
 }
@@ -526,7 +525,7 @@ func (listener *RAWListener) doRead(b []byte) (n int, addr *net.UDPAddr, err err
 			continue
 		}
 		if ok && n == 0 {
-			continue
+			return
 		}
 		listener.mutex.run(func() {
 			info, ok = listener.newcons[addrstr]
