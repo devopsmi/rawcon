@@ -26,11 +26,13 @@ type RAWConn struct {
 	wtimer  *time.Timer
 	layer   *pktLayers
 	r       *Raw
+	hseqn   uint32
 }
 
 func (conn *RAWConn) readLayers() (layer *pktLayers, err error) {
 	for {
 		var packet gopacket.Packet
+		var ok bool
 		if conn.rtimer != nil {
 			select {
 			case <-conn.rtimer.C:
@@ -38,12 +40,15 @@ func (conn *RAWConn) readLayers() (layer *pktLayers, err error) {
 					op: "read from " + conn.RemoteAddr().String(),
 				}
 				return
-			case packet = <-conn.packets:
+			case packet, ok = <-conn.packets:
 			}
 		} else {
-			packet = <-conn.packets
+			packet, ok = <-conn.packets
 		}
-		//log.Println(packet)
+		// log.Println(packet)
+		if packet == nil || !ok {
+			continue
+		}
 		ethLayer := packet.Layer(layers.LayerTypeEthernet)
 		if ethLayer == nil {
 			continue
@@ -116,13 +121,20 @@ func (conn *RAWConn) sendSyn() (err error) {
 	tcp := conn.layer.tcp
 	tcp.SYN = true
 	options := tcp.Options
-	defer func() {
-		tcp.Options = options
-	}()
+	defer func() { tcp.Options = options }()
 	tcp.Options = append(tcp.Options, layers.TCPOption{
 		OptionType:   layers.TCPOptionKindMSS,
 		OptionLength: 4,
 		OptionData:   []byte{0x5, 0xb4},
+	})
+	tcp.Options = append(tcp.Options, layers.TCPOption{
+		OptionType:   layers.TCPOptionKindWindowScale,
+		OptionLength: 3,
+		OptionData:   []byte{0x6},
+	})
+	tcp.Options = append(tcp.Options, layers.TCPOption{
+		OptionType:   layers.TCPOptionKindSACKPermitted,
+		OptionLength: 2,
 	})
 	return conn.sendPacket()
 }
@@ -133,13 +145,20 @@ func (conn *RAWConn) sendSynAck() (err error) {
 	tcp.SYN = true
 	tcp.ACK = true
 	options := tcp.Options
-	defer func() {
-		tcp.Options = options
-	}()
+	defer func() { tcp.Options = options }()
 	tcp.Options = append(tcp.Options, layers.TCPOption{
 		OptionType:   layers.TCPOptionKindMSS,
 		OptionLength: 4,
 		OptionData:   []byte{0x5, 0xb4},
+	})
+	tcp.Options = append(tcp.Options, layers.TCPOption{
+		OptionType:   layers.TCPOptionKindWindowScale,
+		OptionLength: 3,
+		OptionData:   []byte{0x6},
+	})
+	tcp.Options = append(tcp.Options, layers.TCPOption{
+		OptionType:   layers.TCPOptionKindSACKPermitted,
+		OptionLength: 2,
 	})
 	return conn.sendPacket()
 }
@@ -162,18 +181,22 @@ func (conn *RAWConn) sendRst() (err error) {
 	return conn.sendPacket()
 }
 
-func (conn *RAWConn) Write(b []byte) (n int, err error) {
+// the write method don't increace the seq number
+func (conn *RAWConn) write(b []byte) (n int, err error) {
 	n = len(b)
 	conn.updateTCP()
 	tcp := conn.layer.tcp
 	tcp.PSH = true
 	tcp.ACK = true
 	tcp.Payload = b
-	defer func() {
-		tcp.Payload = nil
-		tcp.Seq += uint32(n)
-	}()
+	defer func() { tcp.Payload = nil }()
 	return n, conn.sendPacket()
+}
+
+func (conn *RAWConn) Write(b []byte) (n int, err error) {
+	n, err = conn.write(b)
+	conn.layer.tcp.Seq += uint32(n)
+	return
 }
 
 func (conn *RAWConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
@@ -195,9 +218,11 @@ func (conn *RAWConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 			err = conn.sendAck()
 			if err != nil {
 				return
-			} else {
-				continue
 			}
+			continue
+		}
+		if !tcp.PSH || !tcp.ACK || tcp.Seq == conn.hseqn {
+			continue
 		}
 		if conn.udp != nil {
 			addr = conn.RemoteAddr()
@@ -209,7 +234,6 @@ func (conn *RAWConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 		}
 		n = len(tcp.Payload)
 		if n > 0 {
-			conn.layer.tcp.Ack += uint32(n)
 			if uint64(tcp.Seq)+uint64(n) > uint64(conn.layer.tcp.Ack) {
 				conn.layer.tcp.Ack = tcp.Seq + uint32(n)
 			}
@@ -267,6 +291,23 @@ func (conn *RAWConn) SetDeadline(t time.Time) (err error) {
 		err = conn.SetWriteDeadline(t)
 	}
 	return
+}
+
+func (conn *RAWConn) ackSender() {
+	var err error
+	ackn := conn.layer.tcp.Ack
+	for err == nil {
+		timer := time.NewTimer(time.Millisecond * time.Duration(50+int(src.Int63()%50)))
+		select {
+		case <-timer.C:
+			// log.Println(conn.rack)
+			// log.Println(ackn, conn.layer.tcp.Ack)
+			if ackn != conn.layer.tcp.Ack {
+				ackn = conn.layer.tcp.Ack
+				err = conn.sendAck()
+			}
+		}
+	}
 }
 
 func (r *Raw) DialRAW(address string) (conn *RAWConn, err error) {
@@ -370,6 +411,11 @@ func (r *Raw) DialRAW(address string) (conn *RAWConn, err error) {
 		},
 		r: r,
 	}
+	defer func() {
+		if err == nil && conn != nil {
+			go conn.ackSender()
+		}
+	}()
 	tcp := conn.layer.tcp
 	var cl *pktLayers
 	binary.Read(rand.Reader, binary.LittleEndian, &(conn.layer.tcp.Seq))
@@ -381,9 +427,7 @@ func (r *Raw) DialRAW(address string) (conn *RAWConn, err error) {
 	retry := 0
 	var ackn uint32
 	var seqn uint32
-	defer func() {
-		conn.rtimer = nil
-	}()
+	defer func() { conn.rtimer = nil }()
 	for {
 		if retry > 5 {
 			err = errors.New("retry too many times")
@@ -394,7 +438,7 @@ func (r *Raw) DialRAW(address string) (conn *RAWConn, err error) {
 		if err != nil {
 			return
 		}
-		conn.SetReadDeadline(time.Now().Add(time.Second * 1))
+		conn.SetReadDeadline(time.Now().Add(time.Millisecond * time.Duration(500+int(src.Int63()%500))))
 		cl, err = conn.readLayers()
 		if err != nil {
 			e, ok := err.(net.Error)
@@ -420,7 +464,6 @@ func (r *Raw) DialRAW(address string) (conn *RAWConn, err error) {
 		return
 	}
 	retry = 0
-	opt := getTCPOptions()
 	var headers string
 	if len(r.Host) != 0 {
 		headers += "Host: " + r.Host + "\r\n"
@@ -433,14 +476,11 @@ func (r *Raw) DialRAW(address string) (conn *RAWConn, err error) {
 			return
 		}
 		retry++
-		tcp.Options = opt
-		tcp.Seq = seqn
-		_, err = conn.Write([]byte(req))
+		_, err = conn.write([]byte(req))
 		if err != nil {
 			return
 		}
-		tcp.Options = nil
-		err = conn.SetReadDeadline(time.Now().Add(time.Second * 1))
+		err = conn.SetReadDeadline(time.Now().Add(time.Millisecond * time.Duration(500+int(src.Int63()%500))))
 		if err != nil {
 			return
 		}
@@ -463,10 +503,12 @@ func (r *Raw) DialRAW(address string) (conn *RAWConn, err error) {
 			continue
 		}
 		n := len(cl.tcp.Payload)
-		if cl.tcp.PSH && cl.tcp.ACK && n >= 20 && checkTCPOptions(cl.tcp.Options) {
+		if cl.tcp.PSH && cl.tcp.ACK && n >= 20 {
 			head := string(cl.tcp.Payload[:4])
 			tail := string(cl.tcp.Payload[n-4:])
 			if head == "HTTP" && tail == "\r\n\r\n" {
+				conn.hseqn = cl.tcp.Seq
+				tcp.Seq += uint32(len(req))
 				tcp.Ack = cl.tcp.Seq + uint32(n)
 				break
 			}
@@ -618,27 +660,25 @@ func (listener *RAWListener) ReadFrom(b []byte) (n int, addr net.Addr, err error
 			}
 			if info.state == httprepsent {
 				if tcp.PSH && tcp.ACK {
-					info.rep = nil
-					info.state = established
-				} else {
-					if tcp.PSH && tcp.ACK && checkTCPOptions(tcp.Options) && n > 20 {
+					if tcp.Seq == info.hseqn && n > 20 {
 						head := string(tcp.Payload[:4])
 						tail := string(tcp.Payload[n-4:])
 						if head == "POST" && tail == "\r\n\r\n" {
-							//info.tcp.tcp.Ack = tcp.Seq + 1
 							info.layer.tcp.Ack = tcp.Seq + uint32(n)
+							info.layer.tcp.Seq += uint32(len(info.rep))
 							listener.layer = info.layer
-							listener.layer.tcp.Options = getTCPOptions()
-							_, err = listener.Write(info.rep)
-							listener.layer.tcp.Options = nil
+							_, err = listener.write(info.rep)
 							if err != nil {
 								return
 							}
 						}
+					} else {
+						info.rep = nil
+						info.state = established
 					}
-					listener.layer = info.layer
-					listener.sendFin()
-					continue
+				} else {
+					// listener.layer = info.layer
+					// listener.sendFin()
 				}
 			}
 			if info.state == established {
@@ -648,7 +688,10 @@ func (listener *RAWListener) ReadFrom(b []byte) (n int, addr net.Addr, err error
 			continue
 		}
 		if ok && n == 0 {
-			return
+			if tcp.ACK && tcp.PSH {
+				return
+			}
+			continue
 		}
 		listener.mutex.run(func() {
 			info, ok = listener.newcons[addrstr]
@@ -674,7 +717,7 @@ func (listener *RAWListener) ReadFrom(b []byte) (n int, addr net.Addr, err error
 					}
 				}
 			} else if info.state == waithttpreq {
-				if tcp.PSH && tcp.ACK && checkTCPOptions(tcp.Options) && n > 20 {
+				if tcp.PSH && tcp.ACK && n > 20 {
 					head := string(tcp.Payload[:4])
 					tail := string(tcp.Payload[n-4:])
 					if head == "POST" && tail == "\r\n\r\n" {
@@ -684,8 +727,8 @@ func (listener *RAWListener) ReadFrom(b []byte) (n int, addr net.Addr, err error
 							rep := buildHTTPResponse("")
 							info.rep = []byte(rep)
 						}
-						listener.layer.tcp.Options = getTCPOptions()
-						_, err = listener.Write(info.rep)
+						info.hseqn = tcp.Seq
+						_, err = listener.write(info.rep)
 						if err != nil {
 							return
 						}
@@ -723,7 +766,7 @@ func (listener *RAWListener) ReadFrom(b []byte) (n int, addr net.Addr, err error
 		tcp = &layers.TCP{
 			SrcPort: cl.tcp.DstPort,
 			DstPort: cl.tcp.SrcPort,
-			Window:  12580,
+			Window:  32760,
 			Ack:     cl.tcp.Seq + 1,
 		}
 		layer := &pktLayers{
@@ -778,27 +821,9 @@ type pktLayers struct {
 	tcp *layers.TCP
 }
 
-func getTCPOptions() []layers.TCPOption {
-	return []layers.TCPOption{
-		layers.TCPOption{
-			OptionType:   layers.TCPOptionKindSACKPermitted,
-			OptionLength: 2,
-		},
-	}
-}
-
-func checkTCPOptions(options []layers.TCPOption) (ok bool) {
-	for _, v := range options {
-		if v.OptionType == layers.TCPOptionKindSACKPermitted {
-			ok = true
-			break
-		}
-	}
-	return
-}
-
 type connInfo struct {
 	state uint32
 	layer *pktLayers
 	rep   []byte
+	hseqn uint32
 }
