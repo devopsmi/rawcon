@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"strconv"
 	"time"
@@ -47,7 +48,8 @@ func (conn *RAWConn) readLayers() (layer *pktLayers, err error) {
 		}
 		// log.Println(packet)
 		if packet == nil || !ok {
-			continue
+			err = fmt.Errorf("read from closed connection")
+			return
 		}
 		ethLayer := packet.Layer(layers.LayerTypeEthernet)
 		if ethLayer == nil {
