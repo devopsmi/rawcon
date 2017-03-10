@@ -17,8 +17,6 @@ import (
 
 type RAWConn struct {
 	conn  *net.IPConn
-	wconn *net.IPConn
-	rconn *ipv4.RawConn
 	udp   net.Conn
 	layer *pktLayers
 	buf   []byte
@@ -31,7 +29,7 @@ func (raw *RAWConn) Close() (err error) {
 	if raw.clean != nil {
 		raw.clean.Run()
 	}
-	if raw.udp != nil && raw.wconn != nil {
+	if raw.udp != nil {
 		raw.sendFin()
 	}
 	if raw.udp != nil {
@@ -41,12 +39,6 @@ func (raw *RAWConn) Close() (err error) {
 		err1 := raw.conn.Close()
 		if err1 != nil {
 			err = err1
-		}
-	}
-	if raw.wconn != nil {
-		err2 := raw.wconn.Close()
-		if err2 != nil {
-			err = err2
 		}
 	}
 	return
@@ -66,8 +58,12 @@ func (raw *RAWConn) updateTCP() {
 }
 
 func (raw *RAWConn) sendPacketWithLayer(layer *pktLayers) (err error) {
-	data := layer.tcp.marshal(layer.ip4.srcip, layer.ip4.dstip)
-	_, err = raw.wconn.WriteTo(data, &net.IPAddr{IP: layer.ip4.dstip})
+	data := layer.tcp.marshalWithIPHeader(layer.ip4.srcip, layer.ip4.dstip, raw.r.DSCP)
+	if raw.udp != nil {
+		_, err = raw.conn.Write(data)
+	} else {
+		_, err = raw.conn.WriteTo(data, &net.IPAddr{IP: layer.ip4.dstip})
+	}
 	return
 }
 
@@ -331,10 +327,8 @@ func (r *Raw) DialRAW(address string) (raw *RAWConn, err error) {
 	})
 	raw = &RAWConn{
 		conn:  conn,
-		wconn: wconn,
-		rconn: rconn,
 		udp:   udp,
-		buf:   make([]byte, 65536),
+		buf:   make([]byte, 2048),
 		layer: &pktLayers{
 			ip4: &iPv4Layer{
 				srcip: ulocaladdr.IP,
@@ -345,7 +339,7 @@ func (r *Raw) DialRAW(address string) (raw *RAWConn, err error) {
 				dstPort: uremoteaddr.Port,
 				window:  12580,
 				ackn:    0,
-				data:    make([]byte, 65536),
+				data:    make([]byte, 2048),
 			},
 		},
 		r: r,
@@ -519,13 +513,6 @@ func (r *Raw) ListenRAW(address string) (listener *RAWListener, err error) {
 	if err != nil {
 		return
 	}
-	wconn, err := net.ListenIP("ip4:tcp", &net.IPAddr{IP: udpaddr.IP})
-	if err != nil {
-		return
-	}
-	if r.DSCP != 0 {
-		ipv4.NewConn(wconn).SetTOS(r.DSCP)
-	}
 	rconn, err := ipv4.NewRawConn(conn)
 	fatalErr(err)
 	// filter: tcp and src port udpaddr.Port
@@ -543,10 +530,8 @@ func (r *Raw) ListenRAW(address string) (listener *RAWListener, err error) {
 	listener = &RAWListener{
 		RAWConn: RAWConn{
 			conn:  conn,
-			wconn: wconn,
-			rconn: rconn,
 			udp:   nil,
-			buf:   make([]byte, 65536),
+			buf:   make([]byte, 2048),
 			layer: nil,
 			r:     r,
 		},
@@ -692,7 +677,7 @@ func (listener *RAWListener) doRead(b []byte) (n int, addr *net.UDPAddr, err err
 				dstPort: addr.Port,
 				window:  65535,
 				ackn:    tcp.seqn + 1,
-				data:    make([]byte, 65536),
+				data:    make([]byte, 2048),
 			},
 		}
 		if tcp.chkFlag(SYN) && !tcp.chkFlag(ACK|PSH|FIN) {
@@ -893,6 +878,30 @@ func decodeTCPlayer(data []byte) (tcp *tcpLayer, err error) {
 	return
 }
 
+func (tcp *tcpLayer) marshalWithIPHeader(srcip, dstip net.IP, tos int) (data []byte) {
+	d := tcp.data
+	defer func() {tcp.data = d}()
+	tcp.data = tcp.data[20:]
+	data = tcp.marshal(srcip, dstip)
+	header := ipv4.Header{
+		Version: 4,
+		Len: 20,
+		TOS: tos,
+		TotalLen: len(data)+20,
+		Flags: ipv4.HeaderFlags(ipv4.DontFragment),
+		FragOff: 0,
+		TTL: 64,
+		Protocol: 6,
+		Dst: dstip,
+	}
+	h, _ := header.Marshal()
+	if len(data) > len(tcp.data) {
+		return append(h, data...)
+	}
+	copy(d, h)
+	return d[:header.TotalLen]
+}
+
 func (tcp *tcpLayer) marshal(srcip, dstip net.IP) (data []byte) {
 	tcp.padding = nil
 
@@ -910,7 +919,7 @@ func (tcp *tcpLayer) marshal(srcip, dstip net.IP) (data []byte) {
 		tcp.padding = tcp.pads[:4-rem]
 		headerLen += len(tcp.padding)
 	}
-
+	
 	if len(tcp.data) >= len(tcp.payload)+headerLen {
 		data = tcp.data
 	} else {
