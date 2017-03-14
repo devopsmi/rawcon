@@ -243,7 +243,7 @@ func (conn *RAWConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 			if uint64(tcp.Seq)+uint64(n) > uint64(conn.layer.tcp.Ack) {
 				conn.layer.tcp.Ack = tcp.Seq + uint32(n)
 			}
-			copy(b, tcp.Payload)
+			n = copy(b, tcp.Payload)
 		}
 		return
 	}
@@ -690,7 +690,7 @@ func (listener *RAWListener) ReadFrom(b []byte) (n int, addr net.Addr, err error
 				}
 			}
 			if info.state == established {
-				copy(b, tcp.Payload)
+				n = copy(b, tcp.Payload)
 				return
 			}
 			continue

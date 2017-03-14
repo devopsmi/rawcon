@@ -274,7 +274,7 @@ func (raw *RAWConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 			if uint64(tcp.seqn)+uint64(n) > uint64(raw.layer.tcp.ackn) {
 				raw.layer.tcp.ackn = tcp.seqn + uint32(n)
 			}
-			copy(b, tcp.payload)
+			n = copy(b, tcp.payload)
 		}
 		return n, addr, err
 	}
@@ -326,9 +326,9 @@ func (r *Raw) DialRAW(address string) (raw *RAWConn, err error) {
 		{0x6, 0, 0, 0x00000000},
 	})
 	raw = &RAWConn{
-		conn:  conn,
-		udp:   udp,
-		buf:   make([]byte, 2048),
+		conn: conn,
+		udp:  udp,
+		buf:  make([]byte, 2048),
 		layer: &pktLayers{
 			ip4: &iPv4Layer{
 				srcip: ulocaladdr.IP,
@@ -603,7 +603,7 @@ func (listener *RAWListener) doRead(b []byte) (n int, addr *net.UDPAddr, err err
 				}
 			}
 			if info.state == established {
-				copy(b, tcp.payload)
+				n = copy(b, tcp.payload)
 				return
 			}
 			continue
@@ -880,19 +880,19 @@ func decodeTCPlayer(data []byte) (tcp *tcpLayer, err error) {
 
 func (tcp *tcpLayer) marshalWithIPHeader(srcip, dstip net.IP, tos int) (data []byte) {
 	d := tcp.data
-	defer func() {tcp.data = d}()
+	defer func() { tcp.data = d }()
 	tcp.data = tcp.data[20:]
 	data = tcp.marshal(srcip, dstip)
 	header := ipv4.Header{
-		Version: 4,
-		Len: 20,
-		TOS: tos,
-		TotalLen: len(data)+20,
-		Flags: ipv4.HeaderFlags(ipv4.DontFragment),
-		FragOff: 0,
-		TTL: 64,
+		Version:  4,
+		Len:      20,
+		TOS:      tos,
+		TotalLen: len(data) + 20,
+		Flags:    ipv4.HeaderFlags(ipv4.DontFragment),
+		FragOff:  0,
+		TTL:      64,
 		Protocol: 6,
-		Dst: dstip,
+		Dst:      dstip,
 	}
 	h, _ := header.Marshal()
 	if len(data) > len(tcp.data) {
@@ -919,7 +919,7 @@ func (tcp *tcpLayer) marshal(srcip, dstip net.IP) (data []byte) {
 		tcp.padding = tcp.pads[:4-rem]
 		headerLen += len(tcp.padding)
 	}
-	
+
 	if len(tcp.data) >= len(tcp.payload)+headerLen {
 		data = tcp.data
 	} else {
