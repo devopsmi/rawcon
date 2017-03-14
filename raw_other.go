@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/google/gopacket"
@@ -28,6 +29,7 @@ type RAWConn struct {
 	layer   *pktLayers
 	r       *Raw
 	hseqn   uint32
+	lock    sync.Mutex
 }
 
 func (conn *RAWConn) readLayers() (layer *pktLayers, err error) {
@@ -196,6 +198,8 @@ func (conn *RAWConn) write(b []byte) (n int, err error) {
 }
 
 func (conn *RAWConn) Write(b []byte) (n int, err error) {
+	conn.lock.Lock()
+	defer conn.lock.Unlock()
 	n, err = conn.write(b)
 	conn.layer.tcp.Seq += uint32(n)
 	return
@@ -306,7 +310,9 @@ func (conn *RAWConn) ackSender() {
 			// log.Println(ackn, conn.layer.tcp.Ack)
 			if ackn != conn.layer.tcp.Ack {
 				ackn = conn.layer.tcp.Ack
+				conn.lock.Lock()
 				err = conn.sendAck()
+				conn.lock.Unlock()
 			}
 		}
 	}
