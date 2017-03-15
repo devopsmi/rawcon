@@ -353,7 +353,7 @@ func (r *Raw) DialRAW(address string) (raw *RAWConn, err error) {
 			raw.SetReadDeadline(time.Time{})
 		}
 	}()
-	cmd := exec.Command("iptables", "-A", "OUTPUT", "-p", "tcp", "-s", conn.LocalAddr().String(),
+	cmd := exec.Command("iptables", "-I", "OUTPUT", "-p", "tcp", "-s", conn.LocalAddr().String(),
 		"--sport", strconv.Itoa(ulocaladdr.Port), "-d", conn.RemoteAddr().String(),
 		"--dport", strconv.Itoa(uremoteaddr.Port), "--tcp-flags", "RST", "RST", "-j", "DROP")
 	_, err = cmd.CombinedOutput()
@@ -539,7 +539,7 @@ func (r *Raw) ListenRAW(address string) (listener *RAWListener, err error) {
 		conns:   make(map[string]*connInfo),
 		laddr:   udpaddr,
 	}
-	cmd := exec.Command("iptables", "-A", "OUTPUT", "-p", "tcp", "-s", conn.LocalAddr().String(),
+	cmd := exec.Command("iptables", "-I", "OUTPUT", "-p", "tcp", "-s", conn.LocalAddr().String(),
 		"--sport", strconv.Itoa(udpaddr.Port), "--tcp-flags", "RST", "RST", "-j", "DROP")
 	_, err = cmd.CombinedOutput()
 	if err != nil {
